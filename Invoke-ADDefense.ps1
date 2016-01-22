@@ -364,7 +364,7 @@ function Find-MsfPsExec {
 
         Finds potential MSF PsExec execution on hosts.
 
-        Based on SChris Campbell (@obscuresec)'s work at http://obscuresecurity.blogspot.com/p/presentation-slides.html
+        Based on Chris Campbell (@obscuresec)'s work at http://obscuresecurity.blogspot.com/p/presentation-slides.html
 
     .PARAMETER ComputerName
         
@@ -428,6 +428,92 @@ function Find-MsfPsExec {
         }
     }
 
-    # kick off the threaded script block + arguments 
-    Invoke-ThreadedFunction -ComputerName $TargetComputers -ScriptBlock $HostEnumBlock -Threads 50
+    # kick off the threaded script block
+    Invoke-ThreadedFunction -ComputerName $TargetComputers -ScriptBlock $HostEnumBlock -Threads $Threads
+}
+
+
+function Find-DebuggerBackdoor {
+<#
+    .SYNOPSIS
+
+        Finds potential backdoors set on accessibility binaries.
+
+    .PARAMETER ComputerName
+        
+        Array of specific computers to pull events from.
+
+    .PARAMETER Domain
+
+        Specific domain to pull events from, otherwise defaults the current domain.
+
+    .PARAMETER SearchForest
+
+        Switch. Search all domains in the forest instead of the current one.
+#>
+    
+    [CmdletBinding()]
+    param(
+        [String[]]
+        $ComputerName,
+
+        [String]
+        $Domain = $ENV:UserDNSDomain,
+
+        [Switch]
+        $SearchForest,
+
+        [Int]
+        $Threads = 50
+    )
+
+    # TODO handle threading when passed an array of $ComputerName...
+    if($ComputerName) {
+        $TargetComputers = @($ComputerName)
+    }
+    elseif($SearchForest) {
+        # enumerate all DCs in the current forest
+        $TargetDCs = ([System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest()).Domains.DomainControllers.Name
+    }
+    else {
+        $TargetDCs = @($Domain)
+    }
+
+    $TargetDCs | ForEach-Object {
+        $TargetComputers += (Get-ADComputer -Filter * -Server PRIMARY.testlab.local).DNSHostName
+    }
+
+    $HostEnumBlock = {
+        param($ComputerName)
+
+        # check if the server is up first
+        $Up = $Up = Test-Connection -Count 1 -Quiet -ComputerName $ComputerName
+        if($Up) {
+
+            $Binaries = @("sethc.exe", "Utilman.exe", "osk.exe", "Narrator.exe", "Magnify.exe")
+
+            try{
+                $Binaries | ForEach-Object {
+                    $reg = [WMIClass]"\\$ComputerName\root\default:stdRegProv"
+                    $hklm = 2147483650
+                    $key = "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$($_)"
+                    $value = "Debugger"
+                    
+                    $result = $reg.GetStringValue($hklm, $key, $value).sValue
+
+                    if($result){
+                        $out = New-Object PSObject
+                        $out | Add-Member Noteproperty 'Host' $ComputerName
+                        $out | Add-Member Noteproperty 'Process' $_
+                        $out | Add-Member Noteproperty 'Debugger' $result
+                        $out
+                    }
+                }
+            }
+            catch { }
+        }
+    }
+
+    # kick off the threaded script block 
+    Invoke-ThreadedFunction -ComputerName $TargetComputers -ScriptBlock $HostEnumBlock -Threads $Threads
 }
